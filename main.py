@@ -31,7 +31,6 @@ import keyboards as kb
 logging.basicConfig(format=LOG_FORMAT, level=getattr(logging, LOG_LEVEL, logging.INFO))
 logger = logging.getLogger(__name__)
 
-WAITING_INPUT = {}
 RUNNING_TASKS = {}
 USER_ACCOUNTS_CACHE = {}
 
@@ -379,7 +378,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "btn_add_account":
-        WAITING_INPUT[user_id] = "token"
+        context.user_data["state"] = "token"
         await query.edit_message_text("Send the access_token (64 hex chars).")
         return
 
@@ -501,7 +500,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "btn_email_add":
-        WAITING_INPUT[user_id] = "email"
+        context.user_data["state"] = "email"
         await query.edit_message_text("Send the new email:")
         return
 
@@ -608,7 +607,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != ADMIN_ID:
             await query.answer("Access denied", show_alert=True)
             return
-        WAITING_INPUT[user_id] = "admin_credits"
+        context.user_data["state"] = "admin_credits"
         await query.edit_message_text("Send: <user_id> <amount>")
         return
 
@@ -616,12 +615,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-    state = WAITING_INPUT.get(user_id)
+    state = context.user_data.get("state")
 
     _, otp_service, referral_service = get_services(context)
 
+    # ===== إضافة إيميل =====
+    if state == "email":
+        context.user_data.pop("state", None)
+        if "@" not in text or "." not in text:
+            await update.message.reply_text("صيغة الإيميل غير صحيحة. أرسل إيميل صالح.")
+            return
+            
+        try:
+            ok, reason = otp_service.add_email(user_id, text)
+            if not ok:
+                msg = "Already exists." if reason == "exists" else f"Limit reached ({MAX_EMAILS})."
+                await update.message.reply_text(msg)
+                return
+            emails = otp_service.load_emails(user_id)
+            await update.message.reply_text(
+                f"Added {text} ({len(emails)}/{MAX_EMAILS})", reply_markup=kb.emails_menu(),
+            )
+        except Exception as e:
+            logger.error(f"Add email error: {e}")
+            await update.message.reply_text("حدث خطأ أثناء الإضافة. حاول مرة أخرى.")
+        return
+
+    # ===== إضافة توكن =====
     if state == "token":
-        WAITING_INPUT.pop(user_id, None)
+        context.user_data.pop("state", None)
         if not is_valid_token(text.lower()):
             await update.message.reply_text("Invalid token. Must be 64 hex chars.")
             return
@@ -644,28 +666,16 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    if state == "email":
-        WAITING_INPUT.pop(user_id, None)
-        ok, reason = otp_service.add_email(user_id, text)
-        if not ok:
-            msg = "Already exists." if reason == "exists" else f"Limit reached ({MAX_EMAILS})."
-            await update.message.reply_text(msg)
-            return
-        emails = otp_service.load_emails(user_id)
-        await update.message.reply_text(
-            f"Added {text} ({len(emails)}/{MAX_EMAILS})", reply_markup=kb.emails_menu(),
-        )
-        return
-
+    # ===== إضافة كريدت (أدمن) =====
     if state == "admin_credits":
         if user_id != ADMIN_ID:
-            WAITING_INPUT.pop(user_id, None)
+            context.user_data.pop("state", None)
             return
         parts = text.split()
         if len(parts) != 2 or not parts[0].isdigit() or not parts[1].lstrip("-").isdigit():
             await update.message.reply_text("Use: <user_id> <amount>")
             return
-        WAITING_INPUT.pop(user_id, None)
+        context.user_data.pop("state", None)
         target = int(parts[0])
         amount = int(parts[1])
         total = referral_service.add_credits(target, amount)
